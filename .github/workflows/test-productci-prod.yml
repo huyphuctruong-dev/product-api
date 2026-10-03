@@ -1,0 +1,181 @@
+name: Product API Production CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:latest
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start Product API
+        env:
+          PORT: 3000
+          MONGO_URI: mongodb://localhost:27017/productdb
+        run: |
+          node server.js > server.log 2>&1 &
+          echo $! > server.pid
+
+      - name: Wait for Product API
+        run: |
+          for i in {1..30}; do
+            if curl -s http://localhost:3000/health; then
+              echo "Product API is ready"
+              exit 0
+            fi
+
+            echo "Waiting for Product API..."
+            sleep 2
+          done
+
+          echo "Product API failed to start"
+          cat server.log
+          exit 1
+
+      - name: Test Product API CRUD
+        env:
+          API_URL: http://localhost:3000
+        run: |
+          node <<'EOF'
+          const API_URL = process.env.API_URL;
+
+          async function request(method, path, body) {
+            const response = await fetch(`${API_URL}${path}`, {
+              method,
+              headers: {
+                "Content-Type": "application/json"
+              },
+              body: body ? JSON.stringify(body) : undefined
+            });
+
+            const text = await response.text();
+
+            let data;
+            try {
+              data = JSON.parse(text);
+            } catch {
+              data = text;
+            }
+
+            console.log(`${method} ${path} -> ${response.status}`);
+            console.log(data);
+
+            return { response, data };
+          }
+
+          async function main() {
+            const product = {
+              pid: 999001,
+              pname: "CI Test Product",
+              price: 100000,
+              quantity: 10
+            };
+
+            // POST - Create
+            let result = await request(
+              "POST",
+              "/api/products",
+              product
+            );
+
+            if (result.response.status !== 201) {
+              throw new Error("POST test failed");
+            }
+
+            // GET - Get all products
+            result = await request(
+              "GET",
+              "/api/products"
+            );
+
+            if (result.response.status !== 200) {
+              throw new Error("GET all products test failed");
+            }
+
+            // GET/:pid - Get one product
+            result = await request(
+              "GET",
+              `/api/products/${product.pid}`
+            );
+
+            if (result.response.status !== 200) {
+              throw new Error("GET product by pid test failed");
+            }
+
+            // PUT - Update
+            result = await request(
+              "PUT",
+              `/api/products/${product.pid}`,
+              {
+                pname: "CI Test Product Updated",
+                price: 200000,
+                quantity: 5
+              }
+            );
+
+            if (result.response.status !== 200) {
+              throw new Error("PUT test failed");
+            }
+
+            // DELETE - Delete
+            result = await request(
+              "DELETE",
+              `/api/products/${product.pid}`
+            );
+
+            if (result.response.status !== 200) {
+              throw new Error("DELETE test failed");
+            }
+
+            // Verify DELETE
+            result = await request(
+              "GET",
+              `/api/products/${product.pid}`
+            );
+
+            if (result.response.status !== 404) {
+              throw new Error("DELETE verification failed");
+            }
+
+            console.log("All CRUD tests passed.");
+          }
+
+          main().catch(error => {
+            console.error(error);
+            process.exit(1);
+          });
+          EOF
+
+      - name: Show API logs if tests fail
+        if: failure()
+        run: |
+          echo "===== Product API logs ====="
+          cat server.log
