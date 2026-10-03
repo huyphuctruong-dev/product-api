@@ -46,3 +46,35 @@ jobs:
           echo "CI healthcheck and CRUD tests passed."
           echo "Docker image pushed to Docker Hub."
           echo "Image: ${{ secrets.DOCKERHUB_USERNAME }}/product-api:latest"
+
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    needs: docker
+    runs-on: [self-hosted, Windows, X64]
+
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Check Docker
+        run: |
+          docker version
+          docker compose version
+
+      - name: Pull latest Docker image
+        run: |
+          docker compose -f docker-compose-prod.yaml pull product-api
+
+      - name: Deploy to local Docker Engine
+        run: |
+          docker compose -f docker-compose-prod.yaml up -d --no-build
+
+      - name: Check containers
+        run: |
+          docker compose -f docker-compose-prod.yaml ps
+
+      - name: Check API health
+        run: |
+          Invoke-WebRequest http://localhost:3000/health -UseBasicParsing
